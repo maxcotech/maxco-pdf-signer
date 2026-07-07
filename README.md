@@ -155,6 +155,63 @@ const pdfY = VisualStamper.canvasYToPdfY(
 - Certificate chain is embedded in the PKCS#7. Ensure intermediate certs are included for chain verification.
 - The library does not verify certificate validity or revocation — use a trust store for that.
 
+## REST API
+
+A thin Express wrapper exposes local (Path A) signing over HTTP, so other services can request a signature without importing this package directly. It lives in `server/` and is separate from the library build — importing `pdf-signer` never pulls in Express.
+
+### Setup
+
+```bash
+cp .env.example .env
+# edit .env: set API_KEY, P12_PATH, P12_PASSWORD
+
+npm run dev:server     # ts-node, for local development
+# or
+npm run build:server   # compiles src/ + server/ -> dist-server/
+npm run start:server
+```
+
+| Env var | Required | Purpose |
+|---|---|---|
+| `PORT` | no (default 3000) | HTTP port |
+| `API_KEY` | yes | Shared secret clients must send as `x-api-key` |
+| `P12_PATH` | yes | Path to the signing `.p12`/`.pfx` |
+| `P12_PASSWORD` | yes | Password for that `.p12` |
+| `DEFAULT_PLACEHOLDER_SIZE` | no (default 16384) | `/Contents` slot size in bytes |
+| `HSM_TIMEOUT_MS` | no (default 30000) | Unused by the local-signing route today; reserved for a future remote-HSM route |
+| `MAX_UPLOAD_MB` | no (default 25) | Max accepted PDF upload size |
+
+### `GET /health`
+
+No auth. Returns `{ status: 'ok', service: 'pdf-signer-api' }`.
+
+### `POST /api/v1/sign`
+
+Requires header `x-api-key: <API_KEY>`. `multipart/form-data` body:
+
+| Field | Required | Format |
+|---|---|---|
+| `pdf` | yes | The PDF file |
+| `metadata` | no | JSON string: `{ reason, location, contactInfo, signerName, signingDate, placeholderSizeBytes, subFilter }` |
+| `appearance` | no | JSON string: `{ svgString }` or `{ text, fontSize, color, renderScale }` |
+| `position` | required if `appearance` is set | JSON string: `{ page, x, y, width, height }` |
+
+Response: `200` with `Content-Type: application/pdf` and the signed PDF as the body. Also sets `X-Document-Hash`, `X-Byte-Range`, and `X-Signing-Time` headers. Errors return JSON `{ error, code }` (see [errors.ts](src/errors.ts) for the code list); `400` for bad input, `413` for oversized uploads, `500` for internal failures.
+
+```bash
+curl -X POST http://localhost:3000/api/v1/sign \
+  -H "x-api-key: $API_KEY" \
+  -F "pdf=@contract.pdf" \
+  -F 'metadata={"reason":"Approved","location":"Lagos, Nigeria"}' \
+  -F 'appearance={"text":"Chisom Maxwell"}' \
+  -F 'position={"page":0,"x":350,"y":40,"width":200,"height":60}' \
+  -o signed.pdf
+```
+
+**Not included yet:** a remote-HSM (Path B) route. `hsmSignFunction` is an arbitrary callback into a specific KMS/HSM provider, so a generic HTTP endpoint would need that provider decided first — add a route under `server/routes/` following the same pattern as `sign.ts` once that's chosen.
+
+**Security notes:** the API key is a shared secret, not per-caller auth — fine for a small number of trusted internal services, not for exposing publicly. There's no rate limiting or request logging built in. Put this behind a gateway/mTLS for anything beyond an internal trusted network.
+
 ## API Documentation
 
 See [docs/API.md](docs/API.md) for complete API reference including all interfaces, error types, HSM integration patterns, and coordinate system conversion details.
