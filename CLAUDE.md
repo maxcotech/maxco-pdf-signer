@@ -158,7 +158,7 @@ pdf-signer/
 │   ├── utils/
 │   │   ├── asn1Utils.ts              DER primitives (TAG constants + encode functions)
 │   │   ├── bufferUtils.ts            writeAsciiInPlace, findPattern, stringToPdfHex
-│   │   └── certUtils.ts             parseP12, parsePemCertificates, getIssuerDer
+│   │   └── certUtils.ts             parseP12, normaliseP12Bytes, parsePemCertificates, getIssuerDer
 │   └── visual/
 │       ├── VisualStamper.ts          applyStamp, canvasYToPdfY
 │       ├── VisualStamper.types.ts    SignatureAppearance, StampPosition, VisualStampResult
@@ -354,12 +354,15 @@ DER encoding primitives. All values cite ITU-T X.690.
 
 | Function | Purpose |
 |----------|---------|
-| `parseP12(buffer, password)` | Parse PKCS#12: extract signer cert + CA chain + private key; throws `InvalidCertificateError` on MAC mismatch |
+| `parseP12(buffer, password)` | Parse PKCS#12: extract signer cert + CA chain + private key; throws `InvalidCertificateError` on MAC mismatch. Calls `normaliseP12Bytes` first, so it accepts raw DER or base64 text |
+| `normaliseP12Bytes(input)` | Accept a P12 as raw DER **or** base64 text, return raw DER; throws `InvalidCertificateError` if neither |
 | `parsePemCertificates(pem)` | Parse PEM bundle → `Buffer[]` of DER certs |
 | `parsePemCertificate(pem)` | Single PEM → forge Certificate object |
 | `parseDerCertificate(der)` | DER Buffer → forge Certificate object |
 | `getIssuerDer(cert)` | Extract DER-encoded Issuer Name from TBS (used for IssuerAndSerialNumber in SignerInfo) |
 | `getSerialNumberBuffer(cert)` | Hex serial → Buffer (handles odd-length hex) |
+
+**P12 base64 detection**: text-only secret stores (Render Secret Files, K8s ConfigMaps, CI variables) cannot carry raw `.p12` bytes intact, so operators base64-encode them. `normaliseP12Bytes` distinguishes the two forms exactly rather than heuristically: a PKCS#12 PFX is a DER SEQUENCE so byte 0 is always `0x30`, and base64 of that byte always yields a leading `M` — the shapes are disjoint. It runs inside `parseP12`, so `p12Path` and `p12Buffer` both benefit. Do not add a separate "is base64" option to the public API; detection is reliable and an option would let callers get it wrong.
 
 **P12 chain sorting**: RFC 7292 bags are unordered. `parseP12` identifies the leaf cert (not an issuer of any other cert in the bundle) and walks the chain by Subject→Issuer.
 

@@ -13,17 +13,91 @@ export interface ParsedCertificateChain {
 }
 
 /**
+ * Accept a PKCS#12 bundle as either raw DER bytes or base64-encoded text, and
+ * return raw DER bytes either way.
+ *
+ * Secret-management systems that store only text (Render Secret Files, Kubernetes
+ * ConfigMaps, CI variables) cannot hold the raw bytes of a .p12 without corrupting
+ * them, so operators base64-encode the file. This normalises both shapes so the
+ * same P12_PATH works in every environment.
+ *
+ * Detection is unambiguous rather than heuristic. A PKCS#12 file is a DER SEQUENCE,
+ * so its first byte is always 0x30 (ITU-T X.690 §8.9). Base64-encoding a byte that
+ * starts 0b001100xx always yields a leading 'M', so a raw bundle and an encoded one
+ * can never be confused:
+ *
+ *   raw DER      → first byte 0x30
+ *   base64 text  → first byte 'M' (0x4d)
+ *
+ * @param input - File contents: raw DER, or base64 text (whitespace and BOM tolerated)
+ * @returns Raw DER bytes, ready for forge
+ * @throws InvalidCertificateError if the input is neither shape
+ */
+export function normaliseP12Bytes(input: Buffer): Buffer {
+  if (input.length === 0) {
+    throw new InvalidCertificateError('P12 data is empty (0 bytes)');
+  }
+
+  // Strip a UTF-8 BOM, which text editors can prepend to pasted base64.
+  const body =
+    input.length >= 3 && input[0] === 0xef && input[1] === 0xbb && input[2] === 0xbf
+      ? input.subarray(3)
+      : input;
+
+  // Already raw DER: a PKCS#12 PFX is a SEQUENCE, tag 0x30.
+  if (body[0] === 0x30) {
+    return body;
+  }
+
+  // Otherwise treat it as base64 text. Node's base64 decoder silently discards
+  // invalid characters, so validate the alphabet explicitly instead of trusting it.
+  const compact = body.toString('latin1').replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(compact)) {
+    throw new InvalidCertificateError(
+      'P12 data is neither raw DER (expected first byte 0x30, got 0x' +
+        body[0].toString(16).padStart(2, '0') +
+        ') nor valid base64 text. If this came from a secret manager, re-encode the ' +
+        'file with: base64 -w0 signing.p12',
+    );
+  }
+
+  const unpadded = compact.replace(/=+$/, '');
+  if (unpadded.length % 4 === 1) {
+    throw new InvalidCertificateError(
+      'P12 base64 text is truncated (invalid length). Re-copy the full encoded value.',
+    );
+  }
+
+  const decoded = Buffer.from(unpadded, 'base64');
+  if (decoded.length === 0 || decoded[0] !== 0x30) {
+    throw new InvalidCertificateError(
+      'P12 data decoded from base64 but is not a PKCS#12 bundle (expected DER SEQUENCE ' +
+        '0x30, got 0x' +
+        (decoded[0]?.toString(16).padStart(2, '0') ?? 'none') +
+        '). Check that the encoded file was the .p12 itself, not a PEM or text wrapper.',
+    );
+  }
+
+  return decoded;
+}
+
+/**
  * Parse a PKCS#12 (.p12/.pfx) bundle and extract the signing certificate, CA chain,
  * and private key.
  *
  * RFC 7292: bags are unordered; we sort the chain by matching Subject→Issuer after parsing.
  *
+ * @param p12Buffer - Raw DER bytes, or base64-encoded text; see normaliseP12Bytes
  * @throws InvalidCertificateError on MAC mismatch (wrong password) or malformed data
  */
 export function parseP12(p12Buffer: Buffer, password: string): ParsedCertificateChain {
+  // Accepts raw DER or base64 text, so a P12 delivered through a text-only secret
+  // store works without the caller having to know which form it is.
+  const derBytes = normaliseP12Bytes(p12Buffer);
+
   let p12Asn1: forge.asn1.Asn1;
   try {
-    p12Asn1 = forge.asn1.fromDer(forge.util.createBuffer(p12Buffer.toString('binary')));
+    p12Asn1 = forge.asn1.fromDer(forge.util.createBuffer(derBytes.toString('binary')));
   } catch (err) {
     throw new InvalidCertificateError(`Failed to parse PKCS#12 DER: ${String(err)}`);
   }

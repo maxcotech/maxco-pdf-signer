@@ -175,7 +175,7 @@ npm run start:server
 |---|---|---|
 | `PORT` | no (default 3000) | HTTP port |
 | `API_KEY` | yes | Shared secret clients must send as `x-api-key` |
-| `P12_PATH` | yes | Path to the signing `.p12`/`.pfx` |
+| `P12_PATH` | yes | Path to the signing `.p12`/`.pfx`. May hold raw DER bytes or base64 text — useful for text-only secret stores such as Render Secret Files |
 | `P12_PASSWORD` | yes | Password for that `.p12` |
 | `DEFAULT_PLACEHOLDER_SIZE` | no (default 16384) | `/Contents` slot size in bytes |
 | `HSM_TIMEOUT_MS` | no (default 30000) | Unused by the local-signing route today; reserved for a future remote-HSM route |

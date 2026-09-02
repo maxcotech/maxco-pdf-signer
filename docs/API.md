@@ -212,8 +212,8 @@ Apply visual stamp then sign with a local PKCS#12 certificate.
 |---|---|---|---|
 | `pdfBuffer` | `Buffer` | ✓ | Input PDF bytes |
 | `p12Password` | `string` | ✓ | PKCS#12 decryption password |
-| `p12Path` | `string` | ✓* | Path to .p12/.pfx file |
-| `p12Buffer` | `Buffer` | ✓* | Raw PKCS#12 bytes |
+| `p12Path` | `string` | ✓* | Path to .p12/.pfx file — raw DER **or** base64 text |
+| `p12Buffer` | `Buffer` | ✓* | PKCS#12 bytes — raw DER **or** base64 text |
 | `appearance` | `SignatureAppearance` | — | Visual stamp (SVG or text) |
 | `position` | `StampPosition` | ✓ if appearance | Stamp coordinates in PDF points |
 | `reason` | `string` | — | Signature reason metadata |
@@ -225,6 +225,31 @@ Apply visual stamp then sign with a local PKCS#12 certificate.
 | `subFilter` | `string` | `adbe.pkcs7.detached` | CMS sub-filter |
 
 *Either `p12Path` or `p12Buffer` must be provided.
+
+### Base64-encoded PKCS#12
+
+Both `p12Path` and `p12Buffer` accept the bundle as raw DER bytes or as base64-encoded
+text, and detect which was given. This exists because text-only secret stores (Render
+Secret Files, Kubernetes ConfigMaps, CI variables) cannot hold raw `.p12` bytes without
+corrupting them, so the file has to be base64-encoded to travel through them.
+
+```bash
+base64 -w0 signing.p12          # Linux
+base64 -i signing.p12 | tr -d "
+"   # macOS
+```
+
+Detection is exact, not a guess: a PKCS#12 bundle is a DER `SEQUENCE`, so its first
+byte is always `0x30`; base64-encoding that byte always produces a leading `M`. The two
+forms cannot be confused. Wrapped lines, CRLF endings, surrounding whitespace, a UTF-8
+BOM and missing `=` padding are all tolerated.
+
+If the content is neither shape, `InvalidCertificateError` is thrown naming the byte it
+found and how to re-encode. The password is applied after decoding, so a wrong password
+still reports a MAC failure rather than a parse error.
+
+`normaliseP12Bytes(input: Buffer): Buffer` is exported if you need the same conversion
+standalone.
 
 **Throws:**
 - `MissingPositionError` — appearance provided without position

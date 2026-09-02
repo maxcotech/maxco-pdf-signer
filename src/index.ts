@@ -16,6 +16,7 @@ export type {
   LocalSigningOptions,
   RemoteHsmSigningOptions,
 } from './crypto/CryptoStore.types';
+export { normaliseP12Bytes } from './utils/certUtils';
 export {
   PdfSignerError,
   SignatureOverflowError,
