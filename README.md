@@ -180,23 +180,33 @@ npm run start:server
 | `DEFAULT_PLACEHOLDER_SIZE` | no (default 16384) | `/Contents` slot size in bytes |
 | `HSM_TIMEOUT_MS` | no (default 30000) | Unused by the local-signing route today; reserved for a future remote-HSM route |
 | `MAX_UPLOAD_MB` | no (default 25) | Max accepted PDF upload size |
+| `DOCS_ENABLED` | no (default `true`) | Serve Swagger UI at `/docs` and the spec at `/openapi.json`. Set `false` on internet-facing deployments |
 
-### `GET /health`
+### Interactive documentation
 
-No auth. Returns `{ status: 'ok', service: 'pdf-signer-api' }`.
+The full request/response contract is described by an OpenAPI 3.1 document generated from the same Zod schemas the server validates with — so it cannot drift from the implementation.
 
-### `POST /api/v1/sign`
+| Where | What |
+|---|---|
+| `http://localhost:3000/docs` | Swagger UI. Click **Authorize**, paste your `API_KEY`, and "Try it out" works against the running server |
+| `http://localhost:3000/openapi.json` | The spec as served by this instance |
+| [docs/openapi.json](docs/openapi.json) | The same spec, committed — point client SDK generators at this |
 
-Requires header `x-api-key: <API_KEY>`. `multipart/form-data` body:
+Both HTTP routes are unauthenticated, because a browser cannot attach `x-api-key` when loading the Swagger UI shell. Set `DOCS_ENABLED=false` to remove them rather than trying to put them behind the API key.
 
-| Field | Required | Format |
-|---|---|---|
-| `pdf` | yes | The PDF file |
-| `metadata` | no | JSON string: `{ reason, location, contactInfo, signerName, signingDate, placeholderSizeBytes, subFilter }` |
-| `appearance` | no | JSON string: `{ svgString }` or `{ text, fontSize, color, renderScale }` |
-| `position` | required if `appearance` is set | JSON string: `{ page, x, y, width, height }` |
+```bash
+npm run openapi:emit    # regenerate docs/openapi.json after changing a schema
+npm run openapi:check   # CI: fails if the committed spec is stale
+npm run openapi:lint    # CI: validates the spec with redocly
+```
 
-Response: `200` with `Content-Type: application/pdf` and the signed PDF as the body. Also sets `X-Document-Hash`, `X-Byte-Range`, and `X-Signing-Time` headers. Errors return JSON `{ error, code }` (see [errors.ts](src/errors.ts) for the code list); `400` for bad input, `413` for oversized uploads, `500` for internal failures.
+### Endpoints at a glance
+
+`GET /health` — no auth, returns `{ status: 'ok', service: 'pdf-signer-api' }`.
+
+`POST /api/v1/sign` — `x-api-key` required. `multipart/form-data` with a `pdf` file part; `metadata`, `appearance` and `position` are optional form fields **containing JSON**. Send only `pdf` to get an invisible cryptographic-only signature; `position` becomes required as soon as `appearance` is present.
+
+Returns `200` with `Content-Type: application/pdf`, plus `X-Document-Hash`, `X-Byte-Range` and `X-Signing-Time` headers. Errors return `{ error, code }` — `code` is one of the values in the `ErrorCode` enum in the spec (`VALIDATION_ERROR` responses also carry a `details` array naming each rejected field). See `/docs` for the per-status breakdown.
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/sign \

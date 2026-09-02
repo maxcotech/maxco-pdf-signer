@@ -21,6 +21,7 @@ export interface ServerConfig {
   defaultPlaceholderSize: number;
   hsmTimeoutMs: number;
   maxUploadBytes: number;
+  docsEnabled: boolean;
 }
 
 export function loadConfig(): ServerConfig {
@@ -32,5 +33,9 @@ export function loadConfig(): ServerConfig {
     defaultPlaceholderSize: Number(process.env.DEFAULT_PLACEHOLDER_SIZE ?? 16384),
     hsmTimeoutMs: Number(process.env.HSM_TIMEOUT_MS ?? 30000),
     maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 25) * 1024 * 1024,
+    // Serves /docs and /openapi.json. These are unauthenticated by design (the
+    // Swagger UI shell has to load before the user can enter an API key), so
+    // disable them on internet-facing deployments.
+    docsEnabled: (process.env.DOCS_ENABLED ?? 'true').toLowerCase() !== 'false',
   };
 }

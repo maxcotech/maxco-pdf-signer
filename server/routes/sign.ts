@@ -2,16 +2,21 @@ import { Router } from 'express';
 import multer from 'multer';
 import { PdfSigner } from '../../src/index';
 import type { ServerConfig } from '../config';
+import { JSON_FORM_FIELDS, SignRequestBodySchema } from '../schemas/sign';
 
-function parseJsonField<T>(raw: unknown, fieldName: string): T | undefined {
-  if (raw === undefined || raw === null || raw === '') return undefined;
-  try {
-    return JSON.parse(String(raw)) as T;
-  } catch {
-    throw Object.assign(new Error(`Field "${fieldName}" must be valid JSON`), {
-      statusCode: 400,
-    });
+/**
+ * multer gives every text field as a string, and an omitted field as undefined.
+ * A field submitted but left blank ('') means "not provided" here — normalise it
+ * so the optional() schemas treat it that way rather than failing JSON parsing.
+ */
+function normaliseFormBody(body: Record<string, unknown>): Record<string, unknown> {
+  const normalised: Record<string, unknown> = { ...body };
+  for (const field of JSON_FORM_FIELDS) {
+    if (normalised[field] === '' || normalised[field] === null) {
+      delete normalised[field];
+    }
   }
+  return normalised;
 }
 
 export function createSignRouter(config: ServerConfig): Router {
@@ -29,24 +34,37 @@ export function createSignRouter(config: ServerConfig): Router {
         return;
       }
 
-      const metadata = parseJsonField<Record<string, unknown>>(req.body.metadata, 'metadata') ?? {};
-      const appearance = parseJsonField(req.body.appearance, 'appearance');
-      const position = parseJsonField(req.body.position, 'position');
-      const signingDate = metadata.signingDate ? new Date(metadata.signingDate as string) : undefined;
+      // Single source of truth with the OpenAPI request schema: parses the
+      // JSON-encoded form fields, type-checks every value, and enforces the
+      // cross-field rules before the library is touched.
+      const parsed = SignRequestBodySchema.safeParse(normaliseFormBody(req.body ?? {}));
+      if (!parsed.success) {
+        res.status(400).json({
+          error: 'Request validation failed',
+          code: 'VALIDATION_ERROR',
+          details: parsed.error.issues.map((issue) => ({
+            field: issue.path.length > 0 ? issue.path.join('.') : '(body)',
+            message: issue.message,
+          })),
+        });
+        return;
+      }
+
+      const { metadata, appearance, position } = parsed.data;
 
       const result = await signer.signLocal({
         pdfBuffer: req.file.buffer,
         p12Path: config.p12Path,
         p12Password: config.p12Password,
-        appearance: appearance as never,
-        position: position as never,
-        reason: metadata.reason as string | undefined,
-        location: metadata.location as string | undefined,
-        contactInfo: metadata.contactInfo as string | undefined,
-        signerName: metadata.signerName as string | undefined,
-        signingDate,
-        placeholderSizeBytes: metadata.placeholderSizeBytes as number | undefined,
-        subFilter: metadata.subFilter as 'adbe.pkcs7.detached' | 'ETSI.CAdES.detached' | undefined,
+        appearance,
+        position,
+        reason: metadata?.reason,
+        location: metadata?.location,
+        contactInfo: metadata?.contactInfo,
+        signerName: metadata?.signerName,
+        signingDate: metadata?.signingDate ? new Date(metadata.signingDate) : undefined,
+        placeholderSizeBytes: metadata?.placeholderSizeBytes,
+        subFilter: metadata?.subFilter,
       });
 
       res.set({

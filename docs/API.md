@@ -1,5 +1,10 @@
 # pdf-signer API Reference
 
+> **Looking for the HTTP API?** This document covers the TypeScript library. The REST wrapper in `server/`
+> is described by an OpenAPI 3.1 document: browse it at `/docs` on a running instance, or read
+> [openapi.json](openapi.json). That spec is generated from the server's own validation schemas, so it is
+> the authoritative description of the HTTP contract — do not duplicate endpoint details here.
+
 ## Table of Contents
 
 1. [Installation](#installation)

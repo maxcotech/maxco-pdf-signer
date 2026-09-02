@@ -1,0 +1,458 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "pdf-signer API",
+    "version": "1.0.0",
+    "description": "HTTP wrapper around the `pdf-signer` library: applies a visible signature stamp and a\nPKCS#7/CMS detached cryptographic seal to a PDF in one call.\n\nOnly the local PKCS#12 signing path (Path A) is exposed over HTTP. The remote-HSM path\nrequires a caller-supplied signing callback and is available through the library only.\n\nAuthenticate with the `x-api-key` header on every `/api/v1` route."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This instance"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Signing",
+      "description": "PDF signature operations"
+    },
+    {
+      "name": "Service",
+      "description": "Operational endpoints"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "Shared secret configured as the API_KEY environment variable on the server. Required on every /api/v1 route. Compared in constant time; a mismatch returns 401."
+      }
+    },
+    "schemas": {
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "SIGNATURE_OVERFLOW",
+          "BYTE_RANGE_ERROR",
+          "INVALID_CERTIFICATE",
+          "INVALID_PDF",
+          "INVALID_APPEARANCE",
+          "INVALID_POSITION",
+          "MISSING_POSITION",
+          "HSM_TIMEOUT",
+          "HSM_ERROR",
+          "UNAUTHORIZED",
+          "MISSING_FILE",
+          "VALIDATION_ERROR",
+          "PAYLOAD_TOO_LARGE",
+          "BAD_REQUEST",
+          "INTERNAL_ERROR"
+        ],
+        "description": "Stable machine-readable error identifier. Branch on this rather than on the message text."
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable description. Not stable — do not parse.",
+            "example": "Invalid appearance: svgString must include a viewBox attribute"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "description": "Dotted path to the offending field, or \"(body)\" for a whole-body issue.",
+                  "example": "position.page"
+                },
+                "message": {
+                  "type": "string",
+                  "example": "Expected number, received string"
+                }
+              },
+              "required": [
+                "field",
+                "message"
+              ]
+            },
+            "description": "Present only on VALIDATION_ERROR: one entry per failed field."
+          }
+        },
+        "required": [
+          "error",
+          "code"
+        ],
+        "description": "Standard error envelope returned by every non-2xx response."
+      },
+      "SignatureOverflowResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "example": "PKCS#7 (17004 bytes) exceeds placeholder (16384 bytes). Set placeholderSizeBytes >= 17516."
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "SIGNATURE_OVERFLOW"
+            ]
+          },
+          "actualBytes": {
+            "type": "integer",
+            "description": "Size of the assembled PKCS#7 container.",
+            "example": 17004
+          },
+          "allocatedBytes": {
+            "type": "integer",
+            "description": "Size of the /Contents placeholder it did not fit into.",
+            "example": 16384
+          }
+        },
+        "required": [
+          "error",
+          "code",
+          "actualBytes",
+          "allocatedBytes"
+        ],
+        "description": "Returned when the certificate chain is larger than the allocated /Contents slot. Retry with metadata.placeholderSizeBytes set to actualBytes + 512 or higher."
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "service": {
+            "type": "string",
+            "enum": [
+              "pdf-signer-api"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "service"
+        ]
+      },
+      "SigningMetadata": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "Written to the signature dictionary /Reason.",
+            "example": "Approved for release"
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 512,
+            "example": "New York, USA"
+          },
+          "contactInfo": {
+            "type": "string",
+            "maxLength": 512,
+            "example": "signing@example.com"
+          },
+          "signerName": {
+            "type": "string",
+            "maxLength": 512,
+            "example": "Jane Smith"
+          },
+          "signingDate": {
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-09-01T12:00:00.000Z",
+            "description": "Signing time embedded in the PKCS#7 signedAttrs and the /M entry. Defaults to the server clock."
+          },
+          "placeholderSizeBytes": {
+            "type": "integer",
+            "minimum": 512,
+            "maximum": 1000000,
+            "description": "Size of the /Contents slot in bytes. Raise this if signing fails with SIGNATURE_OVERFLOW. Rough guide: single certificate 3-4KB, three-certificate chain 10-14KB.",
+            "example": 16384
+          },
+          "subFilter": {
+            "type": "string",
+            "enum": [
+              "adbe.pkcs7.detached",
+              "ETSI.CAdES.detached"
+            ],
+            "description": "Signature /SubFilter. Use ETSI.CAdES.detached for eIDAS/PAdES contexts."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SignatureAppearance": {
+        "type": "object",
+        "properties": {
+          "svgString": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A complete SVG document. MUST contain a viewBox attribute — the renderer requires it. Mutually exclusive with `text`.",
+            "example": "<svg viewBox=\"0 0 300 80\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M10,60 C40,10 80,10 120,60\" stroke=\"#000\" fill=\"none\" stroke-width=\"2\"/></svg>"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Text rendered in the bundled Great Vibes script font. Mutually exclusive with `svgString`.",
+            "example": "Jane Smith"
+          },
+          "fontSize": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 400,
+            "description": "Text mode only. Default 32.",
+            "example": 36
+          },
+          "color": {
+            "type": "string",
+            "description": "CSS color for text mode. Default #1a1a2e. Ignored when svgString is used.",
+            "example": "#1a3a6e"
+          },
+          "renderScale": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 4,
+            "description": "Rasterisation scale factor relative to the stamp size. Default 2.",
+            "example": 2
+          }
+        },
+        "additionalProperties": false,
+        "description": "Visual stamp definition. Provide exactly one of `svgString` or `text`."
+      },
+      "StampPosition": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Page index, 0-based.",
+            "example": 0
+          },
+          "x": {
+            "type": "number",
+            "description": "Points from the LEFT page edge.",
+            "example": 50
+          },
+          "y": {
+            "type": "number",
+            "description": "Points from the BOTTOM page edge — PDF origin is bottom-left, unlike browser canvas.",
+            "example": 40
+          },
+          "width": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "example": 200
+          },
+          "height": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "example": 60
+          }
+        },
+        "required": [
+          "page",
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "additionalProperties": false,
+        "description": "Stamp placement in PDF points (1/72 inch), bottom-left origin. Page sizes: A4 595.28x841.89, Letter 612x792, Legal 612x1008."
+      },
+      "SignRequest": {
+        "type": "object",
+        "properties": {
+          "pdf": {
+            "type": "string",
+            "format": "binary",
+            "description": "The PDF to sign. Rejected with 413 above the server MAX_UPLOAD_MB limit."
+          },
+          "metadata": {
+            "type": "string",
+            "contentMediaType": "application/json",
+            "contentSchema": {
+              "$ref": "#/components/schemas/SigningMetadata"
+            },
+            "description": "JSON-encoded SigningMetadata object, sent as a form field value.",
+            "example": "{\"reason\":\"Approved for release\",\"location\":\"New York, USA\"}"
+          },
+          "appearance": {
+            "type": "string",
+            "contentMediaType": "application/json",
+            "contentSchema": {
+              "$ref": "#/components/schemas/SignatureAppearance"
+            },
+            "description": "JSON-encoded SignatureAppearance object, sent as a form field value.",
+            "example": "{\"text\":\"Jane Smith\",\"fontSize\":36}"
+          },
+          "position": {
+            "type": "string",
+            "contentMediaType": "application/json",
+            "contentSchema": {
+              "$ref": "#/components/schemas/StampPosition"
+            },
+            "description": "JSON-encoded StampPosition object, sent as a form field value.",
+            "example": "{\"page\":0,\"x\":50,\"y\":40,\"width\":200,\"height\":60}"
+          }
+        },
+        "required": [
+          "pdf"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": [
+          "Service"
+        ],
+        "summary": "Liveness probe",
+        "description": "Unauthenticated. Use for container health checks and load-balancer probes.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The service is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sign": {
+      "post": {
+        "operationId": "signPdf",
+        "tags": [
+          "Signing"
+        ],
+        "summary": "Sign a PDF with the server certificate",
+        "description": "Applies an optional visible stamp and then a PKCS#7/CMS detached signature, using the\nPKCS#12 certificate configured on the server (P12_PATH / P12_PASSWORD). The stamp is\nrendered *before* hashing, so the stamp pixels fall inside the signed ByteRange and any\nlater modification is detectable in Adobe Acrobat Reader.\n\nBecause the body is multipart/form-data, `metadata`, `appearance` and `position` are sent\nas form field values containing JSON. `position` is required whenever `appearance` is\npresent; omit both to produce an invisible cryptographic-only signature.",
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/SignRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The signed PDF.",
+            "headers": {
+              "X-Document-Hash": {
+                "schema": {
+                  "type": "string",
+                  "description": "Hex SHA-256 of the concatenated ByteRange segments. Recompute it from the returned PDF and X-Byte-Range to verify the response independently.",
+                  "example": "a3f1c0..."
+                },
+                "required": true,
+                "description": "Hex SHA-256 of the concatenated ByteRange segments. Recompute it from the returned PDF and X-Byte-Range to verify the response independently."
+              },
+              "X-Byte-Range": {
+                "schema": {
+                  "type": "string",
+                  "description": "JSON array [offset1, length1, offset2, length2] — the signed byte spans. The gap between them is the /Contents hex slot, which is not signed.",
+                  "example": "[0,12043,28429,3517]"
+                },
+                "required": true,
+                "description": "JSON array [offset1, length1, offset2, length2] — the signed byte spans. The gap between them is the /Contents hex slot, which is not signed."
+              },
+              "X-Signing-Time": {
+                "schema": {
+                  "type": "string",
+                  "description": "UTC ISO 8601 timestamp embedded in the signature.",
+                  "example": "2026-09-01T12:00:00.000Z"
+                },
+                "required": true,
+                "description": "UTC ISO 8601 timestamp embedded in the signature."
+              }
+            },
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: no PDF part (MISSING_FILE), a field failed validation (VALIDATION_ERROR, with per-field `details`), the PDF could not be parsed (INVALID_PDF), the stamp was rejected (INVALID_APPEARANCE / INVALID_POSITION / MISSING_POSITION), or the signature did not fit the placeholder (SIGNATURE_OVERFLOW).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SignatureOverflowResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key header (UNAUTHORIZED).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The uploaded PDF exceeds the server MAX_UPLOAD_MB limit (PAYLOAD_TOO_LARGE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server-side failure: certificate could not be loaded (INVALID_CERTIFICATE), the ByteRange invariant failed (BYTE_RANGE_ERROR), or an unexpected error (INTERNAL_ERROR).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}

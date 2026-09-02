@@ -1,0 +1,16 @@
+# Configuration for `npm run openapi:lint`.
+#
+# Two rules from the recommended ruleset are disabled deliberately; everything
+# else is left at its default so genuine problems still surface.
+extends:
+  - recommended
+
+rules:
+  # The project has no license declared in package.json yet. Re-enable this once
+  # one is chosen, and add `license` to info in server/openapi/document.ts.
+  info-license: off
+
+  # GET /health is an unauthenticated liveness probe with no parameters and no
+  # failure mode other than the process being down, so it has no 4XX to document.
+  # Documenting a fictional error response would be worse than omitting it.
+  operation-4xx-response: off

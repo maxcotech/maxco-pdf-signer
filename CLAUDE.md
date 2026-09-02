@@ -797,6 +797,27 @@ Currently only `Buffer` is returned. To support streaming:
 
 ---
 
+### 11.9 Adding or changing an HTTP endpoint
+
+**Files**: `server/routes/`, `server/schemas/`, `server/openapi/routes.ts`
+
+The `server/` directory is a thin Express wrapper over the library, kept out of the library build (`tsconfig.server.json` compiles `src/` + `server/` to `dist-server/`; the published package's `tsconfig.json` compiles `src/` only). It exposes the local P12 path only.
+
+The HTTP contract is described by an OpenAPI 3.1 document generated from Zod schemas that are *also* the runtime validators, so there is exactly one source of truth. Adding an endpoint means:
+
+1. Define request schemas in `server/schemas/<name>.ts` using `z` imported from `server/openapi/zod` (never from `'zod'` directly — that module patches Zod with `.openapi()`), registering shared object shapes on the `registry` so they become reusable components
+2. Add the route handler in `server/routes/<name>.ts`, validating `req.body` with `safeParse` and returning `400` + `code: 'VALIDATION_ERROR'` with a `details` array on failure
+3. Register the path in `server/openapi/routes.ts` — document every status the handler and `errorHandler` can produce
+4. Add any new error code to `TRANSPORT_ERROR_CODES` in `server/schemas/common.ts`
+5. Run `npm run openapi:emit` to refresh the committed `docs/openapi.json`
+6. Mount the route in `server/app.ts`
+
+`test/openapi.test.ts` enforces steps 3 and 5: it walks the live Express router and fails if a mounted route is missing from the spec, and fails if `docs/openapi.json` is stale. It also asserts that every error code thrown by `src/errors.ts` appears in the documented `ErrorCode` enum.
+
+**Multipart JSON fields**: `POST /api/v1/sign` takes `multipart/form-data` where `metadata`, `appearance` and `position` are form values containing JSON. The `jsonEncoded()` helper in `server/schemas/sign.ts` models this honestly — `z.string()` → `JSON.parse` → object schema at runtime, documented as a string with `contentMediaType: application/json` and a `contentSchema` `$ref` to the component. Do not document these fields as objects; that would describe a wire format the server does not accept.
+
+**Docs route placement**: `/docs` and `/openapi.json` are mounted in `server/app.ts` *above* the `apiKeyAuth` middleware, and are gated by `DOCS_ENABLED` instead. A browser cannot attach `x-api-key` when fetching the Swagger UI shell, so authenticating those routes makes the docs unreachable. Swagger UI's Authorize button supplies the key for "Try it out" calls.
+
 ## 12. Standards & Specification Map
 
 Every non-obvious implementation detail in this codebase is grounded in a published specification. When making changes to cryptographic or PDF structures, consult these.
@@ -898,10 +919,14 @@ New sig algorithm  → pkcs7Builder.ts + asn1Utils.ts
 New metadata field → PdfEngine.types.ts → buildRawSigDict() → CryptoStore.types.ts
                      → CryptoStore.ts → PdfSigner.ts → index.ts → docs/API.md
 New error          → errors.ts → index.ts → docs/API.md
+New HTTP endpoint  → server/schemas/ → server/routes/ → server/openapi/routes.ts
+                     → npm run openapi:emit → server/app.ts
 New test           → test/[suite].test.ts, assert ByteRange + documentHash independently
 Build              → npm run build  (tsc → dist/)
 Test               → npm test       (fixtures in test/fixtures/, output in test/output/)
 Verify signed PDF  → openssl pkcs7 -inform DER -in sig.der -print_certs -noout
+Run REST API       → npm run dev:server   (Swagger UI at /docs)
+Regen OpenAPI      → npm run openapi:emit (then openapi:check / openapi:lint)
 ```
 
 ---
