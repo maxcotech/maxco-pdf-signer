@@ -119,6 +119,11 @@ Two things the allowlist handles that are easy to miss if you proxy this yoursel
   call triggers a preflight. The service answers `OPTIONS` with `204` *before*
   authentication, because a preflight carries no API key and would otherwise
   `401`.
+- **You can send any request headers you like.** A preflight's
+  `Access-Control-Request-Headers` is echoed back verbatim for an allowlisted
+  origin, so a header your HTTP wrapper injects — `timezone`, `x-request-id`, a
+  tracing header — works without a server change. The origin allowlist is the
+  boundary, not the header list.
 - **The `X-*` result headers are exposed explicitly.** A cross-origin `fetch`
   can only read headers named in `Access-Control-Expose-Headers`, so
   `X-Document-Hash`, `X-Byte-Range`, `X-Signing-Time`, `X-Stamp-Rect` and

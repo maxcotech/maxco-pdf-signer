@@ -75,6 +75,46 @@ describe('CORS allowlist', () => {
     expect(res.headers['access-control-allow-headers']).toContain('x-api-key');
   });
 
+  it('allows whatever headers the preflight asks for', async () => {
+    // Regression: a frontend HTTP wrapper adding its own header (`timezone` here)
+    // was blocked by a hardcoded allow-list. The origin allowlist is the
+    // boundary; once past it, a client picks its own request headers.
+    const res = await request(app)
+      .options('/api/v1/sign')
+      .set('Origin', ALLOWED_LOCAL)
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'x-api-key,timezone,content-type');
+
+    expect(res.status).toBe(204);
+    const allowedHeaders = res.headers['access-control-allow-headers'];
+    for (const header of ['x-api-key', 'timezone', 'content-type']) {
+      expect(allowedHeaders).toContain(header);
+    }
+    // A cache must not reuse this reply for a preflight asking for other headers.
+    expect(res.headers.vary).toContain('Access-Control-Request-Headers');
+  });
+
+  it('falls back to the known headers when a preflight names none', async () => {
+    const res = await request(app)
+      .options('/api/v1/sign')
+      .set('Origin', ALLOWED_LOCAL)
+      .set('Access-Control-Request-Method', 'POST');
+
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-headers']).toContain('x-api-key');
+  });
+
+  it('reflects nothing for an unlisted origin, whatever it asks for', async () => {
+    const res = await request(app)
+      .options('/api/v1/sign')
+      .set('Origin', 'https://evil.example.com')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'x-api-key,timezone');
+
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['access-control-allow-headers']).toBeUndefined();
+  });
+
   it('exposes the signing result headers to a cross-origin caller', async () => {
     const res = await request(app)
       .post('/api/v1/sign')
