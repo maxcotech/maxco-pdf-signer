@@ -39,8 +39,14 @@
 
 import { VisualStamper } from './visual/VisualStamper';
 import { CryptoStore } from './crypto/CryptoStore';
+import { inspectPdf } from './engine/inspectPdf';
 import { MissingPositionError } from './errors';
-import type { SignatureAppearance, StampPosition } from './visual/VisualStamper.types';
+import type {
+  ResolvedStampPosition,
+  SignatureAppearance,
+  StampPosition,
+} from './visual/VisualStamper.types';
+import type { PdfInspection } from './engine/PdfEngine.types';
 import type { SigningMetadata, SignedPdfResult } from './crypto/CryptoStore.types';
 
 export interface PdfSignerConstructorOptions {
@@ -110,6 +116,7 @@ export class PdfSigner {
    */
   async signLocal(options: LocalSignOptions): Promise<SignedPdfResult> {
     let pdfToSign = options.pdfBuffer;
+    let stampRect: ResolvedStampPosition | undefined;
 
     // Phase 1: Visual stamping — MUST happen before Phase 2.
     // The stamp is baked into the PDF bytes. Phase 2 hashes those bytes.
@@ -117,16 +124,17 @@ export class PdfSigner {
     // Adobe would report the document as "modified after signing."
     if (options.appearance) {
       if (!options.position) throw new MissingPositionError();
-      const { stampedPdfBuffer } = await this.visualStamper.applyStamp(
+      const { stampedPdfBuffer, resolvedPosition } = await this.visualStamper.applyStamp(
         pdfToSign,
         options.appearance,
         options.position,
       );
       pdfToSign = stampedPdfBuffer;
+      stampRect = resolvedPosition;
     }
 
     // Phase 2: Cryptographic sealing
-    return this.cryptoStore.signWithLocalCertificate(
+    const result = await this.cryptoStore.signWithLocalCertificate(
       pdfToSign,
       {
         p12Path: options.p12Path,
@@ -143,6 +151,10 @@ export class PdfSigner {
         subFilter: options.subFilter,
       },
     );
+
+    // Reported back so a caller who sent browser coordinates can confirm where
+    // the stamp actually landed without re-parsing the PDF.
+    return stampRect ? { ...result, stampRect } : result;
   }
 
   /**
@@ -158,16 +170,18 @@ export class PdfSigner {
    */
   async signRemote(options: RemoteSignOptions): Promise<SignedPdfResult> {
     let pdfToSign = options.pdfBuffer;
+    let stampRect: ResolvedStampPosition | undefined;
 
     // Phase 1: Visual stamping — MUST happen before Phase 2 (same reasoning as signLocal)
     if (options.appearance) {
       if (!options.position) throw new MissingPositionError();
-      const { stampedPdfBuffer } = await this.visualStamper.applyStamp(
+      const { stampedPdfBuffer, resolvedPosition } = await this.visualStamper.applyStamp(
         pdfToSign,
         options.appearance,
         options.position,
       );
       pdfToSign = stampedPdfBuffer;
+      stampRect = resolvedPosition;
     }
 
     // Normalise cert inputs
@@ -177,7 +191,7 @@ export class PdfSigner {
       })();
 
     // Phase 2: Cryptographic sealing via HSM
-    return this.cryptoStore.signWithRemoteHsm(
+    const result = await this.cryptoStore.signWithRemoteHsm(
       pdfToSign,
       {
         signerCertificate,
@@ -195,6 +209,42 @@ export class PdfSigner {
       },
       this.hsmTimeoutMs,
     );
+
+    return stampRect ? { ...result, stampRect } : result;
+  }
+
+  /**
+   * Describe a PDF without modifying it: page count, per-page size in points,
+   * page rotation, and whether it is encrypted or already signed.
+   *
+   * This is the call that makes stamp placement possible. A StampPosition is
+   * expressed relative to a page's dimensions, so a caller building one — a UI
+   * letting someone drag a signature box, or code placing a stamp a fixed
+   * distance from a corner — needs those dimensions first. It is also the right
+   * point to reject a document: an encrypted PDF cannot be signed at all, and a
+   * non-zero `signatureCount` means the upload was signed before.
+   *
+   * @example
+   * ```typescript
+   * const { pages, encrypted } = await signer.inspect(pdfBuffer);
+   * if (encrypted) throw new Error('Remove the password before signing');
+   *
+   * // Place a 200x60pt stamp 40pt in from the bottom-right corner of page 0
+   * const page = pages[0];
+   * const position = {
+   *   page: 0,
+   *   x: page.widthPts - 200 - 40,
+   *   y: 40,
+   *   width: 200,
+   *   height: 60,
+   * };
+   * ```
+   *
+   * @throws InvalidPdfError if the buffer is not a readable PDF. Encryption is
+   *   reported in the result rather than thrown.
+   */
+  async inspect(pdfBuffer: Buffer): Promise<PdfInspection> {
+    return inspectPdf(pdfBuffer);
   }
 
   /**

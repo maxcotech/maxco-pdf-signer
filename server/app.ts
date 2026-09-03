@@ -5,6 +5,7 @@ import { buildOpenApiDocument } from './openapi/document';
 import { apiKeyAuth } from './middleware/apiKeyAuth';
 import { errorHandler } from './middleware/errorHandler';
 import { createSignRouter } from './routes/sign';
+import { createInspectRouter } from './routes/inspect';
 
 export function createApp(config: ServerConfig): Express {
   const app = express();
@@ -33,7 +34,9 @@ export function createApp(config: ServerConfig): Express {
     );
   }
 
-  app.use('/api/v1', apiKeyAuth(config.apiKey), createSignRouter(config));
+  const authenticated = apiKeyAuth(config.apiKey);
+  app.use('/api/v1', authenticated, createInspectRouter(config));
+  app.use('/api/v1', authenticated, createSignRouter(config));
 
   app.use(errorHandler);
 

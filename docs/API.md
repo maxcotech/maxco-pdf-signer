@@ -285,6 +285,59 @@ Apply visual stamp then sign with an external Cloud HSM/KMS.
 - `HsmTimeoutError` — HSM callback did not resolve within `hsmTimeoutMs`
 - All errors from `signLocal` (except certificate-related)
 
+### `inspect(pdfBuffer)` → `Promise<PdfInspection>`
+
+Describe a PDF without modifying it. Call this before building a `StampPosition` — a stamp
+rectangle only means something relative to the dimensions of the page it targets.
+
+```typescript
+const { pageCount, pages, encrypted, signatureCount } = await signer.inspect(pdfBuffer);
+
+if (encrypted) throw new Error('Encrypted PDFs cannot be signed');
+
+// 200×60pt stamp, 40pt in from the bottom-right corner of page 0
+const page = pages[0];
+const position = {
+  page: 0,
+  x: page.widthPts - 200 - 40,
+  y: 40,
+  width: 200,
+  height: 60,
+};
+```
+
+```typescript
+interface PdfInspection {
+  sizeBytes: number;
+  pageCount: number;        // 0 when encrypted
+  pages: PdfPageInfo[];     // empty when encrypted
+  encrypted: boolean;       // true → cannot be signed at all
+  signatureCount: number;   // > 0 → already signed at least once
+  signable: boolean;
+}
+
+interface PdfPageInfo {
+  index: number;             // 0-based — the value StampPosition.page takes
+  widthPts: number;          // user space (MediaBox) — use this for stamp arithmetic
+  heightPts: number;
+  rotation: number;          // 0 | 90 | 180 | 270
+  displayWidthPts: number;   // what a viewer shows; swaps with height on a quarter turn
+  displayHeightPts: number;
+}
+```
+
+An **encrypted** PDF returns `encrypted: true` rather than throwing — you need the fact in
+order to explain the rejection. Only an unreadable buffer throws `InvalidPdfError`.
+
+**`signatureCount`** counts `/ByteRange` entries across the whole file, including earlier
+incremental revisions. Counter-signing is legitimate, so this is informational: it tells you
+an upload was not a fresh document.
+
+The standalone function `inspectPdf(pdfBuffer)` is also exported if you do not need a
+`PdfSigner` instance.
+
+---
+
 ### `verifyByteRangeIntegrity(buffer)` → `Promise<VerificationResult>`
 
 Check that a signed PDF's ByteRange arithmetic is internally consistent.
@@ -326,15 +379,40 @@ Provide exactly one of `svgString` or `text`.
 ```typescript
 interface StampPosition {
   page: number;    // 0-based page index
-  x: number;       // PDF points from left edge
-  y: number;       // PDF points from BOTTOM edge (PDF convention)
-  width: number;   // Stamp width in points
-  height: number;  // Stamp height in points
+  x: number;       // from left edge, in `units`
+  y: number;       // from the edge named by `origin`, in `units`
+  width: number;   // stamp width, in `units`
+  height: number;  // stamp height, in `units`
+
+  // Declares the space the numbers above are in. Omit all four for the
+  // PDF-native default: points, measured from the bottom-left corner.
+  origin?: 'bottom-left' | 'top-left';   // default 'bottom-left'
+  units?: 'pt' | 'px';                   // default 'pt'
+  viewportWidth?: number;                // units:'px' only — rendered page width in px
+  viewportHeight?: number;               // units:'px' only — interchangeable with the above
 }
 ```
 
-**All values in PDF user-space points (1 point = 1/72 inch).**
-See [Coordinate System Reference](#coordinate-system-reference) for browser conversion.
+**By default all values are PDF user-space points (1 point = 1/72 inch) measured from the
+bottom-left corner of the page.**
+
+A rectangle captured in a browser is in none of those: top-left origin, pixels, and scaled
+to however the page was rendered. Rather than converting it yourself, declare the space and
+the library converts against the page geometry it reads from the document:
+
+```typescript
+position: {
+  page: 0,
+  x: 120, y: 80, width: 200, height: 60,
+  origin: 'top-left',
+  units: 'px',
+  viewportWidth: 1000,   // the page was rendered 1000px wide
+}
+```
+
+`result.stampRect` then reports the rectangle actually drawn, in points with a bottom-left
+origin. See [Coordinate System Reference](#coordinate-system-reference) for the rules,
+including why rotated pages refuse conversion.
 
 ### `SigningMetadata`
 
@@ -359,8 +437,15 @@ interface SignedPdfResult {
   pkcs7Hex: string;           // Hex-encoded PKCS#7 DER
   byteRange: [number, number, number, number]; // [offset1, length1, offset2, length2]
   signingTime: string;        // UTC ISO 8601 timestamp
+
+  // Where the stamp was drawn, in points with a bottom-left origin, after any
+  // origin/units conversion. Absent when no appearance was supplied.
+  stampRect?: { page: number; x: number; y: number; width: number; height: number };
 }
 ```
+
+`stampRect` is worth asserting on when you send browser coordinates: it confirms the
+conversion landed where your UI drew the box, without re-parsing the returned PDF.
 
 ### `VerificationResult`
 
@@ -401,7 +486,53 @@ Common page sizes in points (width × height):
   A3:     841.89 × 1190.55
 ```
 
+### Preferred: declare the space, don't convert
+
+Do not do this arithmetic by hand. Wrong conversions are silent — the signature is
+cryptographically perfect and the stamp is simply in the wrong place. Declare the space on
+the `StampPosition` and the library resolves it against the real page geometry:
+
+```typescript
+const result = await signer.signLocal({
+  pdfBuffer,
+  p12Path, p12Password,
+  appearance: { text: 'Jane Smith' },
+  position: {
+    page: 0,
+    x: 120, y: 80, width: 200, height: 60,
+    origin: 'top-left',
+    units: 'px',
+    viewportWidth: 1000,
+  },
+});
+
+console.log(result.stampRect); // { page: 0, x: 73.44, y: 686.16, ... } — in points
+```
+
+`viewportWidth` is the **rendered page width in pixels** — `page.getViewport({ scale }).width`
+from pdf.js, or the width of the page canvas element. Not the container, not the window.
+`viewportHeight` is interchangeable; supplying both cross-checks them against the page aspect
+ratio and rejects a mismatch above 2%, which catches measuring the wrong element.
+
+**Rejected, as `InvalidPositionError`:**
+
+| Condition | Why |
+|---|---|
+| `units: 'px'` with no viewport dimension | There is no scale to convert by |
+| Viewport fields with `units: 'pt'` | Contradictory — you probably meant `'px'` |
+| Both viewport dimensions disagreeing by > 2% | The measured box is not the rendered page |
+| Any conversion on a page with non-zero `/Rotate` | The displayed box differs from the drawing space; a correct mapping needs a full affine transform, so this refuses rather than approximating. Send user-space points — `/Rotate` does not affect them. |
+| A resolved rectangle entirely off the page | Nothing would be drawn. Overhanging one edge is fine; missing completely is the classic unconverted coordinate. |
+
+### `resolveStampPosition(position, pageGeometry)`
+
+Exported if you need the mapping without stamping — for previewing a rectangle in a UI,
+say. `pageGeometry` is `{ widthPts, heightPts, rotation }`, which `inspect()` provides.
+
 ### `VisualStamper.canvasYToPdfY(canvasY, stampHeightPts, pageHeightPts, pixelsPerPoint?)`
+
+The manual helper, retained for callers doing their own arithmetic. Also exported as a
+standalone `canvasYToPdfY`.
 
 ```typescript
 // Example: signature at Y=200px on 96dpi canvas, A4 page, 60pt tall stamp

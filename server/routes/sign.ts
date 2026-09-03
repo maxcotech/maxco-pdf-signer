@@ -74,6 +74,15 @@ export function createSignRouter(config: ServerConfig): Router {
         'X-Byte-Range': JSON.stringify(result.byteRange),
         'X-Signing-Time': result.signingTime,
       });
+
+      // Where the stamp actually landed, in PDF points with a bottom-left
+      // origin, after any origin/units conversion. A client that sent browser
+      // coordinates can check this against what it drew on screen instead of
+      // re-parsing the returned PDF to find out.
+      if (result.stampRect) {
+        res.set('X-Stamp-Rect', JSON.stringify(result.stampRect));
+      }
+
       res.send(result.signedPdf);
     } catch (err) {
       next(err);

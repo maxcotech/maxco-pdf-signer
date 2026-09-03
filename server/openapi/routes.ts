@@ -12,6 +12,7 @@ import {
   SignatureOverflowResponseSchema,
 } from '../schemas/common';
 import { SignRequestSchema } from '../schemas/sign';
+import { InspectRequestSchema, InspectResponseSchema } from '../schemas/inspect';
 import { z } from './zod';
 
 const jsonError = (description: string) => ({
@@ -43,6 +44,47 @@ export function registerPaths(): void {
 
   registry.registerPath({
     method: 'post',
+    path: '/api/v1/documents/inspect',
+    operationId: 'inspectDocument',
+    tags: ['Documents'],
+    summary: 'Read a PDF page geometry without modifying it',
+    description: [
+      'Returns the page count, the size of every page in PDF points, and each page /Rotate —',
+      'the facts a client needs before it can build a `position` for POST /api/v1/sign at all.',
+      'Call this first: inspect, place, sign.',
+      '',
+      'Also reports whether the document is encrypted (this service cannot sign a',
+      'password-protected PDF) and how many signatures it already carries, which are the two',
+      'reasons to reject an upload before a user has filled anything in.',
+      '',
+      'Read-only. The uploaded document is parsed in memory and discarded with the response —',
+      'nothing is stored, modified or signed.',
+    ].join('\n'),
+    security: API_KEY_SECURITY,
+    request: {
+      body: {
+        required: true,
+        content: { 'multipart/form-data': { schema: InspectRequestSchema } },
+      },
+    },
+    responses: {
+      200: {
+        description: 'What the server could determine about the document.',
+        content: { 'application/json': { schema: InspectResponseSchema } },
+      },
+      400: jsonError(
+        'No PDF part was sent (MISSING_FILE), or the upload could not be parsed as a PDF ' +
+          '(INVALID_PDF). An encrypted PDF is NOT an error here — it returns 200 with ' +
+          '`encrypted: true` so the caller can explain the rejection.',
+      ),
+      401: jsonError('Missing or invalid x-api-key header (UNAUTHORIZED).'),
+      413: jsonError('The uploaded PDF exceeds the server MAX_UPLOAD_MB limit (PAYLOAD_TOO_LARGE).'),
+      500: jsonError('Unexpected server-side failure (INTERNAL_ERROR).'),
+    },
+  });
+
+  registry.registerPath({
+    method: 'post',
     path: '/api/v1/sign',
     operationId: 'signPdf',
     tags: ['Signing'],
@@ -54,8 +96,15 @@ export function registerPaths(): void {
       'later modification is detectable in Adobe Acrobat Reader.',
       '',
       'Because the body is multipart/form-data, `metadata`, `appearance` and `position` are sent',
-      'as form field values containing JSON. `position` is required whenever `appearance` is',
-      'present; omit both to produce an invisible cryptographic-only signature.',
+      'as form field values containing JSON — a string per field, not a nested object part.',
+      '`position` is required whenever `appearance` is present; omit both to produce an',
+      'invisible cryptographic-only signature.',
+      '',
+      '`position` defaults to PDF points with a bottom-left origin. A rectangle taken from a',
+      'browser is neither, so declare the space it was measured in — `origin: "top-left"`,',
+      '`units: "px"`, `viewportWidth: <rendered page width>` — and the server converts it',
+      'against the real page geometry. The rectangle finally used comes back in X-Stamp-Rect.',
+      'Call POST /api/v1/documents/inspect first for the page sizes.',
     ].join('\n'),
     security: API_KEY_SECURITY,
     request: {
@@ -84,6 +133,19 @@ export function registerPaths(): void {
             description: 'UTC ISO 8601 timestamp embedded in the signature.',
             example: '2026-09-01T12:00:00.000Z',
           }),
+          // Optional, unlike the other three: a cryptographic-only signature
+          // draws no stamp, so there is no rectangle to report.
+          'X-Stamp-Rect': z
+            .string()
+            .optional()
+            .openapi({
+              description:
+                'Present only when a stamp was applied. JSON object {page, x, y, width, height} ' +
+                'giving the rectangle actually drawn, in PDF points with a bottom-left origin, ' +
+                'after any origin/units conversion. Compare it against what your UI drew to ' +
+                'confirm placement without re-parsing the PDF.',
+              example: '{"page":0,"x":50,"y":40,"width":200,"height":60}',
+            }),
         }),
         content: {
           'application/pdf': {

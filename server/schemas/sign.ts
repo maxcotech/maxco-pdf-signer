@@ -93,27 +93,97 @@ const appearanceValidated = appearanceShape.refine(
   'Provide exactly one of "svgString" or "text" — not both, not neither',
 );
 
+const positionShape = z
+  .object({
+    page: z.number().int().min(0).openapi({ description: 'Page index, 0-based.', example: 0 }),
+    x: z.number().openapi({
+      description: 'Distance from the LEFT page edge, in `units`.',
+      example: 50,
+    }),
+    y: z.number().openapi({
+      description:
+        'Distance from the page edge named by `origin`, in `units`. With the default ' +
+        'origin (bottom-left) this is measured UPWARD from the bottom — the PDF convention, ' +
+        'opposite to a browser.',
+      example: 40,
+    }),
+    width: z.number().positive().openapi({ example: 200 }),
+    height: z.number().positive().openapi({ example: 60 }),
+    origin: z.enum(['bottom-left', 'top-left']).optional().openapi({
+      description:
+        'Which page corner `y` is measured from. Default "bottom-left" (PDF convention). ' +
+        'Use "top-left" for a value taken straight from a browser, and the server flips it ' +
+        'against the real page height. Cannot be converted on a page with a non-zero /Rotate.',
+      example: 'top-left',
+    }),
+    units: z.enum(['pt', 'px']).optional().openapi({
+      description:
+        'Unit of x/y/width/height. Default "pt" (PDF points, 1/72 inch). Use "px" for a ' +
+        'rectangle measured in pixels over a rendered page, together with viewportWidth or ' +
+        'viewportHeight. Cannot be converted on a page with a non-zero /Rotate.',
+      example: 'px',
+    }),
+    viewportWidth: z.number().positive().optional().openapi({
+      description:
+        'Pixel width of the rendered page the rectangle was measured against — e.g. ' +
+        'pdf.js `page.getViewport({ scale }).width`. Required with units:"px" unless ' +
+        'viewportHeight is given. Only valid with units:"px".',
+      example: 1000,
+    }),
+    viewportHeight: z.number().positive().optional().openapi({
+      description:
+        'Pixel height of the rendered page the rectangle was measured against. ' +
+        'Interchangeable with viewportWidth; when both are sent they are cross-checked ' +
+        'against the page aspect ratio. Only valid with units:"px".',
+      example: 1414,
+    }),
+  })
+  .strict();
+
 export const StampPositionSchema = registry.register(
   'StampPosition',
-  z
-    .object({
-      page: z.number().int().min(0).openapi({ description: 'Page index, 0-based.', example: 0 }),
-      x: z.number().openapi({ description: 'Points from the LEFT page edge.', example: 50 }),
-      y: z.number().openapi({
-        description:
-          'Points from the BOTTOM page edge — PDF origin is bottom-left, unlike browser canvas.',
-        example: 40,
-      }),
-      width: z.number().positive().openapi({ example: 200 }),
-      height: z.number().positive().openapi({ example: 60 }),
-    })
-    .strict()
-    .openapi({
-      description:
-        'Stamp placement in PDF points (1/72 inch), bottom-left origin. ' +
-        'Page sizes: A4 595.28x841.89, Letter 612x792, Legal 612x1008.',
-    }),
+  positionShape.openapi({
+    description:
+      'Stamp placement. By default in PDF points with a bottom-left origin — A4 is ' +
+      '595.28x841.89, Letter 612x792, Legal 612x1008; call POST /api/v1/documents/inspect for ' +
+      'the actual page sizes. Set `origin` and `units` to send the rectangle in the space it ' +
+      'was measured in (a browser gives top-left pixels) and the server converts it against ' +
+      'the real page geometry. The rectangle actually used is returned in the X-Stamp-Rect ' +
+      'response header.',
+  }),
 );
+
+/**
+ * Enforces the position rules the library would otherwise reject later, so they
+ * surface as a per-field VALIDATION_ERROR rather than an INVALID_POSITION with
+ * no field path. The remaining rules — page rotation, off-page rectangles —
+ * depend on the document and can only be checked once it is parsed.
+ */
+const positionValidated = positionShape
+  .superRefine((position, ctx) => {
+    const hasViewport =
+      position.viewportWidth !== undefined || position.viewportHeight !== undefined;
+
+    if (position.units === 'px' && !hasViewport) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['viewportWidth'],
+        message:
+          'units:"px" requires viewportWidth or viewportHeight — the pixel size of the ' +
+          'rendered page the rectangle was measured against',
+      });
+    }
+
+    if (position.units !== 'px' && hasViewport) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['units'],
+        message:
+          'viewportWidth/viewportHeight are only meaningful with units:"px". Set units:"px", ' +
+          'or drop the viewport fields if the rectangle is already in points',
+      });
+    }
+  });
 
 /**
  * `contentMediaType` is an OpenAPI 3.1 keyword. zod-to-openapi types its metadata
@@ -171,7 +241,7 @@ const jsonFormFields = {
     '{"text":"Jane Smith","fontSize":36}',
   ).optional(),
   position: jsonEncoded(
-    StampPositionSchema,
+    positionValidated,
     'StampPosition',
     '{"page":0,"x":50,"y":40,"width":200,"height":60}',
   ).optional(),

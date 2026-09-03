@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "pdf-signer API",
-    "version": "1.0.0",
-    "description": "HTTP wrapper around the `pdf-signer` library: applies a visible signature stamp and a\nPKCS#7/CMS detached cryptographic seal to a PDF in one call.\n\nOnly the local PKCS#12 signing path (Path A) is exposed over HTTP. The remote-HSM path\nrequires a caller-supplied signing callback and is available through the library only.\n\nAuthenticate with the `x-api-key` header on every `/api/v1` route."
+    "version": "1.1.0",
+    "description": "HTTP wrapper around the `maxco-pdf-signer` library: applies a visible signature stamp and a\nPKCS#7/CMS detached cryptographic seal to a PDF in one call.\n\nOnly the local PKCS#12 signing path (Path A) is exposed over HTTP. The remote-HSM path\nrequires a caller-supplied signing callback and is available through the library only.\n\nThe intended flow is two calls: POST /api/v1/documents/inspect to learn the page\ngeometry a stamp rectangle has to be expressed against, then POST /api/v1/sign to\nstamp and seal. Authenticate with the `x-api-key` header on every `/api/v1` route."
   },
   "servers": [
     {
@@ -12,6 +12,10 @@
     }
   ],
   "tags": [
+    {
+      "name": "Documents",
+      "description": "Read-only document inspection"
+    },
     {
       "name": "Signing",
       "description": "PDF signature operations"
@@ -243,12 +247,12 @@
           },
           "x": {
             "type": "number",
-            "description": "Points from the LEFT page edge.",
+            "description": "Distance from the LEFT page edge, in `units`.",
             "example": 50
           },
           "y": {
             "type": "number",
-            "description": "Points from the BOTTOM page edge — PDF origin is bottom-left, unlike browser canvas.",
+            "description": "Distance from the page edge named by `origin`, in `units`. With the default origin (bottom-left) this is measured UPWARD from the bottom — the PDF convention, opposite to a browser.",
             "example": 40
           },
           "width": {
@@ -260,6 +264,36 @@
             "type": "number",
             "exclusiveMinimum": 0,
             "example": 60
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "bottom-left",
+              "top-left"
+            ],
+            "description": "Which page corner `y` is measured from. Default \"bottom-left\" (PDF convention). Use \"top-left\" for a value taken straight from a browser, and the server flips it against the real page height. Cannot be converted on a page with a non-zero /Rotate.",
+            "example": "top-left"
+          },
+          "units": {
+            "type": "string",
+            "enum": [
+              "pt",
+              "px"
+            ],
+            "description": "Unit of x/y/width/height. Default \"pt\" (PDF points, 1/72 inch). Use \"px\" for a rectangle measured in pixels over a rendered page, together with viewportWidth or viewportHeight. Cannot be converted on a page with a non-zero /Rotate.",
+            "example": "px"
+          },
+          "viewportWidth": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Pixel width of the rendered page the rectangle was measured against — e.g. pdf.js `page.getViewport({ scale }).width`. Required with units:\"px\" unless viewportHeight is given. Only valid with units:\"px\".",
+            "example": 1000
+          },
+          "viewportHeight": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Pixel height of the rendered page the rectangle was measured against. Interchangeable with viewportWidth; when both are sent they are cross-checked against the page aspect ratio. Only valid with units:\"px\".",
+            "example": 1414
           }
         },
         "required": [
@@ -270,7 +304,7 @@
           "height"
         ],
         "additionalProperties": false,
-        "description": "Stamp placement in PDF points (1/72 inch), bottom-left origin. Page sizes: A4 595.28x841.89, Letter 612x792, Legal 612x1008."
+        "description": "Stamp placement. By default in PDF points with a bottom-left origin — A4 is 595.28x841.89, Letter 612x792, Legal 612x1008; call POST /api/v1/documents/inspect for the actual page sizes. Set `origin` and `units` to send the rectangle in the space it was measured in (a browser gives top-left pixels) and the server converts it against the real page geometry. The rectangle actually used is returned in the X-Stamp-Rect response header."
       },
       "SignRequest": {
         "type": "object",
@@ -311,6 +345,109 @@
         "required": [
           "pdf"
         ]
+      },
+      "PdfPageInfo": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "Page index, 0-based — the value to send as StampPosition.page.",
+            "example": 0
+          },
+          "widthPts": {
+            "type": "number",
+            "description": "Page width in PDF points (1/72 inch) in user space. Stamp coordinates are in this space, so this is the number to do stamp arithmetic against.",
+            "example": 595.28
+          },
+          "heightPts": {
+            "type": "number",
+            "description": "Page height in PDF points in user space.",
+            "example": 841.89
+          },
+          "rotation": {
+            "type": "integer",
+            "description": "Page /Rotate, normalised to 0, 90, 180 or 270. A non-zero value means a top-left or pixel rectangle cannot be converted for this page — send user-space points instead.",
+            "example": 0
+          },
+          "displayWidthPts": {
+            "type": "number",
+            "description": "Width of the box a viewer displays: swapped with the height when rotation is 90 or 270. A pixel rectangle measured over a rendered page is relative to this box.",
+            "example": 595.28
+          },
+          "displayHeightPts": {
+            "type": "number",
+            "description": "Height of the box a viewer displays. See displayWidthPts.",
+            "example": 841.89
+          }
+        },
+        "required": [
+          "index",
+          "widthPts",
+          "heightPts",
+          "rotation",
+          "displayWidthPts",
+          "displayHeightPts"
+        ],
+        "description": "Geometry of a single page."
+      },
+      "InspectResponse": {
+        "type": "object",
+        "properties": {
+          "sizeBytes": {
+            "type": "integer",
+            "description": "Size of the uploaded PDF in bytes.",
+            "example": 24576
+          },
+          "pageCount": {
+            "type": "integer",
+            "description": "Number of pages. 0 when the document is encrypted and could not be read.",
+            "example": 3
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PdfPageInfo"
+            },
+            "description": "Per-page geometry, in document order. Empty when encrypted."
+          },
+          "encrypted": {
+            "type": "boolean",
+            "description": "True when the PDF is password-protected. Such a document cannot be signed — reject it at upload and ask for an unprotected copy.",
+            "example": false
+          },
+          "signatureCount": {
+            "type": "integer",
+            "description": "Existing signature dictionaries found anywhere in the file, including earlier incremental revisions. Non-zero means the document was signed before; signing again is legitimate but is rarely intended for what an app treats as a fresh upload.",
+            "example": 0
+          },
+          "signable": {
+            "type": "boolean",
+            "description": "Whether this document can be submitted to POST /api/v1/sign as-is.",
+            "example": true
+          }
+        },
+        "required": [
+          "sizeBytes",
+          "pageCount",
+          "pages",
+          "encrypted",
+          "signatureCount",
+          "signable"
+        ],
+        "description": "What the server can determine about an uploaded PDF without modifying it. Nothing is stored: the document is parsed in memory and discarded with the response."
+      },
+      "InspectRequest": {
+        "type": "object",
+        "properties": {
+          "pdf": {
+            "type": "string",
+            "format": "binary",
+            "description": "The PDF to inspect. Rejected with 413 above the server MAX_UPLOAD_MB limit."
+          }
+        },
+        "required": [
+          "pdf"
+        ]
       }
     },
     "parameters": {}
@@ -339,6 +476,83 @@
         }
       }
     },
+    "/api/v1/documents/inspect": {
+      "post": {
+        "operationId": "inspectDocument",
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Read a PDF page geometry without modifying it",
+        "description": "Returns the page count, the size of every page in PDF points, and each page /Rotate —\nthe facts a client needs before it can build a `position` for POST /api/v1/sign at all.\nCall this first: inspect, place, sign.\n\nAlso reports whether the document is encrypted (this service cannot sign a\npassword-protected PDF) and how many signatures it already carries, which are the two\nreasons to reject an upload before a user has filled anything in.\n\nRead-only. The uploaded document is parsed in memory and discarded with the response —\nnothing is stored, modified or signed.",
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/InspectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What the server could determine about the document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No PDF part was sent (MISSING_FILE), or the upload could not be parsed as a PDF (INVALID_PDF). An encrypted PDF is NOT an error here — it returns 200 with `encrypted: true` so the caller can explain the rejection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key header (UNAUTHORIZED).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The uploaded PDF exceeds the server MAX_UPLOAD_MB limit (PAYLOAD_TOO_LARGE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server-side failure (INTERNAL_ERROR).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sign": {
       "post": {
         "operationId": "signPdf",
@@ -346,7 +560,7 @@
           "Signing"
         ],
         "summary": "Sign a PDF with the server certificate",
-        "description": "Applies an optional visible stamp and then a PKCS#7/CMS detached signature, using the\nPKCS#12 certificate configured on the server (P12_PATH / P12_PASSWORD). The stamp is\nrendered *before* hashing, so the stamp pixels fall inside the signed ByteRange and any\nlater modification is detectable in Adobe Acrobat Reader.\n\nBecause the body is multipart/form-data, `metadata`, `appearance` and `position` are sent\nas form field values containing JSON. `position` is required whenever `appearance` is\npresent; omit both to produce an invisible cryptographic-only signature.",
+        "description": "Applies an optional visible stamp and then a PKCS#7/CMS detached signature, using the\nPKCS#12 certificate configured on the server (P12_PATH / P12_PASSWORD). The stamp is\nrendered *before* hashing, so the stamp pixels fall inside the signed ByteRange and any\nlater modification is detectable in Adobe Acrobat Reader.\n\nBecause the body is multipart/form-data, `metadata`, `appearance` and `position` are sent\nas form field values containing JSON — a string per field, not a nested object part.\n`position` is required whenever `appearance` is present; omit both to produce an\ninvisible cryptographic-only signature.\n\n`position` defaults to PDF points with a bottom-left origin. A rectangle taken from a\nbrowser is neither, so declare the space it was measured in — `origin: \"top-left\"`,\n`units: \"px\"`, `viewportWidth: <rendered page width>` — and the server converts it\nagainst the real page geometry. The rectangle finally used comes back in X-Stamp-Rect.\nCall POST /api/v1/documents/inspect first for the page sizes.",
         "security": [
           {
             "apiKeyAuth": []
@@ -392,6 +606,15 @@
                 },
                 "required": true,
                 "description": "UTC ISO 8601 timestamp embedded in the signature."
+              },
+              "X-Stamp-Rect": {
+                "schema": {
+                  "type": "string",
+                  "description": "Present only when a stamp was applied. JSON object {page, x, y, width, height} giving the rectangle actually drawn, in PDF points with a bottom-left origin, after any origin/units conversion. Compare it against what your UI drew to confirm placement without re-parsing the PDF.",
+                  "example": "{\"page\":0,\"x\":50,\"y\":40,\"width\":200,\"height\":60}"
+                },
+                "required": false,
+                "description": "Present only when a stamp was applied. JSON object {page, x, y, width, height} giving the rectangle actually drawn, in PDF points with a bottom-left origin, after any origin/units conversion. Compare it against what your UI drew to confirm placement without re-parsing the PDF."
               }
             },
             "content": {

@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist-client",
+    "rootDir": "./client",
+    // The client is platform-neutral: it uses only fetch/FormData/Blob, which
+    // exist in browsers and in Node 18+. DOM is included for the browser side of
+    // that; @types/node supplies the same globals for the Node side.
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["client/**/*"],
+  "exclude": ["node_modules", "dist", "dist-client", "dist-server", "test"]
+}

@@ -1,3 +1,5 @@
+import type { ResolvedStampPosition } from '../visual/VisualStamper.types';
+
 export interface LocalSigningOptions {
   p12Path?: string;
   p12Buffer?: Buffer;
@@ -40,4 +42,11 @@ export interface SignedPdfResult {
   pkcs7Hex: string; // hex-encoded PKCS#7 DER
   byteRange: [number, number, number, number];
   signingTime: string; // UTC ISO 8601
+  /**
+   * Where the visual stamp was actually drawn, in PDF user-space points with
+   * bottom-left origin, after any origin/units conversion. Absent when no
+   * appearance was supplied. Set by PdfSigner, not by CryptoStore — the crypto
+   * layer never sees the stamp.
+   */
+  stampRect?: ResolvedStampPosition;
 }

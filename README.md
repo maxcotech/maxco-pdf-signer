@@ -8,6 +8,8 @@ Two signing paths:
 - **Path A — Local P12**: signs using a `.p12`/`.pfx` PKCS#12 file, all crypto in-process
 - **Path B — Remote HSM**: decouples hash computation from signing; works with AWS KMS, Azure Key Vault, and GCP Cloud KMS
 
+> **Building a document-signing feature in another app?** Start with **[INTEGRATION.md](INTEGRATION.md)** — the guide for calling this service over HTTP, including the coordinate rules, the error-recovery table, and a rules snippet to drop into your own agent instructions.
+
 ## Features
 
 | Feature | Detail |
@@ -129,12 +131,51 @@ openssl pkcs7 -inform DER -in sig.der -print_certs -noout
 openssl asn1parse -inform DER -in sig.der
 ```
 
-## Coordinate System
+## Inspecting a Document
 
-PDF uses bottom-left origin (Y increases upward). Browser canvas uses top-left origin.
+A stamp rectangle only means something relative to a page's dimensions, so read them first:
 
 ```typescript
-// Convert browser Y coordinate to PDF Y coordinate at 96dpi
+const { pageCount, pages, encrypted, signatureCount } = await signer.inspect(pdfBuffer);
+
+if (encrypted) throw new Error('Encrypted PDFs cannot be signed');
+
+// 200x60pt stamp, 40pt in from the bottom-right corner of page 0
+const page = pages[0];
+const position = {
+  page: 0,
+  x: page.widthPts - 200 - 40,
+  y: 40,
+  width: 200,
+  height: 60,
+};
+```
+
+Each entry reports `widthPts`/`heightPts` (user space — what stamp coordinates use), `rotation`, and `displayWidthPts`/`displayHeightPts` (the box a viewer shows, with axes swapped on a quarter turn). `inspect` does not modify the document.
+
+## Coordinate System
+
+PDF uses a bottom-left origin measured in points (Y increases upward). Browsers use a top-left origin measured in pixels of a page rendered at some scale.
+
+Rather than converting by hand, declare the space your rectangle is in — the conversion then happens against the real page geometry, and an unconvertible or off-page rectangle is rejected instead of silently drawing nothing:
+
+```typescript
+position: {
+  page: 0,
+  x: 120, y: 80, width: 200, height: 60,
+  origin: 'top-left',    // 'bottom-left' (default) | 'top-left'
+  units: 'px',           // 'pt' (default) | 'px'
+  viewportWidth: 1000,   // pixel width of the rendered page you measured over
+}
+```
+
+`result.stampRect` reports where the stamp actually landed, in points with a bottom-left origin.
+
+`viewportHeight` is interchangeable with `viewportWidth`; sending both cross-checks them against the page aspect ratio. Pages with a non-zero `rotation` reject conversion — send user-space points for those.
+
+The manual helper is still available for callers doing their own arithmetic:
+
+```typescript
 const pdfY = VisualStamper.canvasYToPdfY(
   canvasY,        // pixels from top of canvas
   stampHeight,    // stamp height in PDF points
@@ -204,11 +245,17 @@ npm run openapi:lint    # CI: validates the spec with redocly
 
 `GET /health` — no auth, returns `{ status: 'ok', service: 'pdf-signer-api' }`.
 
+`POST /api/v1/documents/inspect` — `x-api-key` required. `multipart/form-data` with a `pdf` file part. Returns the page count, each page's size in points and `/Rotate`, plus `encrypted` and `signatureCount`. Read-only; nothing is stored. This is the first call in the flow — a client cannot build a `position` without the page dimensions.
+
 `POST /api/v1/sign` — `x-api-key` required. `multipart/form-data` with a `pdf` file part; `metadata`, `appearance` and `position` are optional form fields **containing JSON**. Send only `pdf` to get an invisible cryptographic-only signature; `position` becomes required as soon as `appearance` is present.
 
-Returns `200` with `Content-Type: application/pdf`, plus `X-Document-Hash`, `X-Byte-Range` and `X-Signing-Time` headers. Errors return `{ error, code }` — `code` is one of the values in the `ErrorCode` enum in the spec (`VALIDATION_ERROR` responses also carry a `details` array naming each rejected field). See `/docs` for the per-status breakdown.
+Returns `200` with `Content-Type: application/pdf`, plus `X-Document-Hash`, `X-Byte-Range`, `X-Signing-Time` and — when a stamp was drawn — `X-Stamp-Rect` giving the rectangle actually used in points. Errors return `{ error, code }` — `code` is one of the values in the `ErrorCode` enum in the spec (`VALIDATION_ERROR` responses also carry a `details` array naming each rejected field). See `/docs` for the per-status breakdown.
 
 ```bash
+curl -X POST http://localhost:3000/api/v1/documents/inspect \
+  -H "x-api-key: $API_KEY" \
+  -F "pdf=@contract.pdf"
+
 curl -X POST http://localhost:3000/api/v1/sign \
   -H "x-api-key: $API_KEY" \
   -F "pdf=@contract.pdf" \
@@ -217,6 +264,30 @@ curl -X POST http://localhost:3000/api/v1/sign \
   -F 'position={"page":0,"x":350,"y":40,"width":200,"height":60}' \
   -o signed.pdf
 ```
+
+### Typed client
+
+`pdf-signer/client` is a dependency-free typed client for the API, so a consuming app does not hand-build the multipart body — the `metadata`/`appearance`/`position` parts are JSON *strings*, and appending an object to a `FormData` silently sends `[object Object]`.
+
+```typescript
+import { PdfSignerClient, PdfSignerApiError } from 'pdf-signer/client';
+
+const client = new PdfSignerClient({ baseUrl: 'https://signer.internal', apiKey: KEY });
+
+const { pages, encrypted } = await client.inspect(pdfBuffer);
+const { signedPdf, stampRect } = await client.sign({
+  pdf: pdfBuffer,
+  appearance: { text: 'Jane Smith' },
+  position: {
+    page: 0, x: 120, y: 80, width: 200, height: 60,
+    origin: 'top-left', units: 'px', viewportWidth: 1000,
+  },
+});
+```
+
+Non-2xx responses throw `PdfSignerApiError` carrying the stable `code`, the `details` array for validation failures, and `suggestedPlaceholderSize` for retrying a `SIGNATURE_OVERFLOW`. It targets `fetch`/`FormData`/`Blob`, so it works on Node 18+ and in browsers — though the API key must never reach a browser. Built by `npm run build:client`.
+
+**[INTEGRATION.md](INTEGRATION.md)** is the full consumer-facing guide: the inspect→place→sign flow, coordinate rules, per-code error recovery, a complete worked endpoint, and a rules snippet for a consuming project's agent instructions.
 
 **Not included yet:** a remote-HSM (Path B) route. `hsmSignFunction` is an arbitrary callback into a specific KMS/HSM provider, so a generic HTTP endpoint would need that provider decided first — add a route under `server/routes/` following the same pattern as `sign.ts` once that's chosen.
 

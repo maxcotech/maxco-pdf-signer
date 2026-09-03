@@ -81,7 +81,7 @@ describe('OpenAPI document', () => {
     const first = buildOpenApiDocument();
     const second = buildOpenApiDocument();
     expect(second).toBe(first);
-    expect(Object.keys(first.paths ?? {})).toHaveLength(2);
+    expect(Object.keys(first.paths ?? {})).toHaveLength(3);
   });
 
   it('declares the x-api-key security scheme and applies it to /api/v1 routes', () => {
