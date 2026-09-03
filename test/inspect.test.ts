@@ -25,6 +25,7 @@ const testConfig: ServerConfig = {
   hsmTimeoutMs: 30000,
   maxUploadBytes: 25 * 1024 * 1024,
   docsEnabled: false,
+  corsOrigins: ['http://localhost:3100'],
 };
 
 const samplePdf = () => fs.readFileSync(path.join(__dirname, 'fixtures', 'sample.pdf'));

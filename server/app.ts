@@ -3,12 +3,17 @@ import swaggerUi from 'swagger-ui-express';
 import { ServerConfig } from './config';
 import { buildOpenApiDocument } from './openapi/document';
 import { apiKeyAuth } from './middleware/apiKeyAuth';
+import { cors } from './middleware/cors';
 import { errorHandler } from './middleware/errorHandler';
 import { createSignRouter } from './routes/sign';
 import { createInspectRouter } from './routes/inspect';
 
 export function createApp(config: ServerConfig): Express {
   const app = express();
+
+  // Above every other route, including apiKeyAuth: a browser preflight carries
+  // no x-api-key header, so it has to be answered before authentication.
+  app.use(cors(config.corsOrigins));
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', service: 'pdf-signer-api' });

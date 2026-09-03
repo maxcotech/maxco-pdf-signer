@@ -99,6 +99,39 @@ This is a single shared secret, not per-user auth. **Keep it server-side.** Do n
 
 ---
 
+## 4a. Calling from a browser (CORS)
+
+The service answers cross-origin requests only from an allowlist, configured with
+`CORS_ORIGINS` (comma-separated, no trailing slashes). It ships defaulting to:
+
+```
+CORS_ORIGINS=http://localhost:3100,https://signsig-business-dev.netlify.app
+```
+
+An origin outside the list gets a normal `200` with **no**
+`Access-Control-Allow-Origin` header — the browser is what blocks it, not the
+server. Callers that send no `Origin` at all (curl, server-to-server, tests) are
+unaffected by the list.
+
+Two things the allowlist handles that are easy to miss if you proxy this yourself:
+
+- **`x-api-key` is not a CORS-safelisted request header**, so every authenticated
+  call triggers a preflight. The service answers `OPTIONS` with `204` *before*
+  authentication, because a preflight carries no API key and would otherwise
+  `401`.
+- **The `X-*` result headers are exposed explicitly.** A cross-origin `fetch`
+  can only read headers named in `Access-Control-Expose-Headers`, so
+  `X-Document-Hash`, `X-Byte-Range`, `X-Signing-Time`, `X-Stamp-Rect` and
+  `Content-Disposition` are listed. Without that the sign call still succeeds and
+  `documentHash` comes back empty — a silent failure, not an error.
+
+Note this does not change the advice above: an allowlisted origin still has to
+send `x-api-key`, so a browser calling the service directly means shipping the
+shared secret to the client. Use it for a trusted internal tool or local
+development; for a public frontend, keep calling through your own backend.
+
+---
+
 ## 5. Coordinates — read this section
 
 This is where integrations go wrong, and it fails *silently*: the signature is cryptographically perfect and simply appears in the wrong place.

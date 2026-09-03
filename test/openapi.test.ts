@@ -29,6 +29,7 @@ const testConfig: ServerConfig = {
   hsmTimeoutMs: 30000,
   maxUploadBytes: 25 * 1024 * 1024,
   docsEnabled: true,
+  corsOrigins: ['http://localhost:3100'],
 };
 
 let app: Express;
